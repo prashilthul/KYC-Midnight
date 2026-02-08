@@ -1,5 +1,5 @@
 import * as api from './api.js';
-import { PreprodConfig } from './config.js';
+import { localConfig } from './config.js';
 import { Buffer } from 'buffer';
 import * as crypto from 'crypto';
 import readline from 'readline/promises';

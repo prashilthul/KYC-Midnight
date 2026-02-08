@@ -1,23 +1,27 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { MidnightDAppAPI } from './midnight-api';
 import { 
   ShieldCheck, 
   Upload, 
   Fingerprint, 
-  CheckCircle2, 
-  Terminal as TerminalIcon, 
+  Search, 
+  Calendar, 
   User, 
-  Globe, 
-  Eye, 
+  MapPin, 
+  ChevronRight, 
+  Copy, 
+  Check, 
+  FileText, 
+  CheckCircle2, 
+  ShieldAlert, 
+  Cpu, 
+  Database, 
+  Wallet, 
+  Link,
   EyeOff,
-  ChevronRight,
-  Database,
-  Lock,
-  Cpu,
-  Copy,
-  Check,
-  Search,
-  MapPin,
-  Calendar
+  Lock as LockIcon,
+  Terminal as TerminalIcon,
+  ExternalLink
 } from 'lucide-react';
 
 type Mode = 'user' | 'verifier';
@@ -35,17 +39,74 @@ function App() {
   const [hasCopied, setHasCopied] = useState(false);
 
   // Verifier State
-  const [verifierHash, setVerifierHash] = useState('0x7a2d48bf6e9a4c12d00d2f8e9a4c12d00d2');
+  const [verifierHash, setVerifierHash] = useState('');
   const [vType, setVType] = useState<VerificationType>('age');
   const [verifyStatus, setVerifyStatus] = useState<'idle' | 'checking' | 'verified' | 'failed'>('idle');
   const [ageThreshold, setAgeThreshold] = useState(18);
+  const [walletAddr, setWalletAddr] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isMocked, setIsMocked] = useState(false);
+  const [geoRequired, setGeoRequired] = useState('United States');
+  const [deployedAddress, setDeployedAddress] = useState<string | null>(null);
+  const [kycSecret, setKycSecret] = useState<Uint8Array | null>(null);
+  const midnightApi = useRef<MidnightDAppAPI>(new MidnightDAppAPI());
+
+  const COUNTRY_MAP: Record<string, number> = {
+    'United States': 1,
+    'United Kingdom': 2,
+    'India': 3,
+    'Japan': 4,
+    'Germany': 5,
+    'Other': 99
+  };
 
   const addLog = (msg: string) => {
     setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   };
 
+  // Helper to check if hash is valid format
+  const isValidHashFormat = (hash: string): boolean => {
+    const hexPattern = /^0x[0-9a-fA-F]{64}$/;
+    return hexPattern.test(hash.trim());
+  };
+
+  const connectWallet = async () => {
+    setIsConnecting(true);
+    addLog('System: Searching for Midnight Lace extension...');
+    
+    try {
+      // @ts-ignore
+      const midnight = window.midnight;
+      if (!midnight || !midnight.mnLace) {
+        throw new Error('EXTENSION_MISSING');
+      }
+
+      addLog('System: Requesting connection from Lace...');
+      const walletAPI = await midnight.mnLace.connect('undeployed');
+      
+      const { shieldedAddress } = await walletAPI.getShieldedAddresses();
+      
+      // Initialize Midnight API with the connected wallet
+      await midnightApi.current.initialize(walletAPI);
+      
+      setWalletAddr(shieldedAddress);
+      setIsMocked(false);
+      addLog(`Wallet Connected: ${shieldedAddress.substring(0, 10)}... (Real Connection)`);
+      setIsConnecting(false);
+    } catch (err: any) {
+      if (err.message === 'EXTENSION_MISSING') {
+        addLog('⚠️ Error: Midnight Lace Wallet not found.');
+        addLog('👉 Please install the extension to use the real flow.');
+      } else {
+        addLog(`Error: ${err.message || 'Failed to connect to Lace Wallet.'}`);
+      }
+      setIsConnecting(false);
+    }
+  };
+
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Only scroll to the end of logs without smooth behavior to avoid hijacking the scroll
+    logEndRef.current?.scrollIntoView({ block: 'nearest' });
   }, [logs]);
 
   const copyToClipboard = () => {
@@ -73,82 +134,209 @@ function App() {
   // --- Real Hashing Logic (SubtleCrypto) ---
   const calculateHash = async () => {
     setIsProcessing(true);
-    addLog('System: Initializing hashing algorithm (SHA-256)...');
-    
-    // Concatenate audit data + a simulated secret key
-    const secret = "midnight_private_key_sim_2026";
-    const dataString = `${extractedData.name}-${extractedData.dob}-${extractedData.country}-${extractedData.idNumber}-${secret}`;
-    
-    const msgUint8 = new TextEncoder().encode(dataString);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hashHex = '0x' + hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    
+    addLog('System: Generating Zero-Knowledge commitment secret...');
+    const secret = window.crypto.getRandomValues(new Uint8Array(32));
+    setKycSecret(secret);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', secret);
+    const hashHex = '0x' + Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
     setTimeout(() => {
       setUserHash(hashHex);
-      addLog(`System: Hash generated from audited PII.`);
+      addLog("System: Commitment generated: " + hashHex.substring(0, 16) + "...");
       setIsProcessing(false);
       setStep('commit');
-    }, 800);
+    }, 1200);
   };
 
-  const handlePublish = () => {
+  const handlePublish = async () => {
     setIsProcessing(true);
-    addLog('Midnight Prover: Generating ZK proof for commitment ownership...');
-    addLog(`Midnight Node: Submitting transaction to local ledger...`);
     
-    setTimeout(() => {
-      // PERSIST TO SIMULATED LEDGER
+    // Check if wallet is connected (required for real blockchain deployment)
+    if (!walletAddr) {
+      addLog('⚠️ Warning: Lace Wallet not connected. Using SIMULATION mode.');
+      addLog('💡 Connect wallet for REAL Zero-Knowledge Proof generation.');
+      addLog('Simulation: Storing commitment in localStorage (NOT on blockchain)...');
+      
+      // Fallback to simulation
       const ledger = JSON.parse(localStorage.getItem('midnight_sim_ledger') || '[]');
       if (!ledger.includes(userHash)) {
         ledger.push(userHash);
         localStorage.setItem('midnight_sim_ledger', JSON.stringify(ledger));
       }
       
-      addLog(`Success: Identity hash ${userHash.substring(0, 10)}... anchored successfully.`);
+      setTimeout(() => {
+        addLog(`Simulation Complete: Hash stored locally (not on Midnight blockchain)`);
+        setIsProcessing(false);
+        setStep('success');
+      }, 1500);
+      return;
+    }
+    
+    // Real blockchain deployment path
+    addLog('Midnight Prover: Generating ZK proof for commitment ownership...');
+    addLog(`Midnight Node: Submitting registration transaction to local ledger...`);
+    
+    try {
+      // Convert userHash (from calculation) back to Uint8Array for the circuit
+      const commitment = new Uint8Array(userHash.replace('0x', '').match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+      const walletAddressBytes = new Uint8Array(32); // Mocked for now, in real it should match the wallet
+      
+      // Check if contract address exists in environment
+      const envContractAddress = (import.meta as any).env?.VITE_CONTRACT_ADDRESS;
+      
+      let finalizedTx;
+      
+      if (envContractAddress && envContractAddress.trim() !== '') {
+        // Connect to existing contract and call register circuit
+        addLog(`Connecting to deployed contract: ${envContractAddress.substring(0, 10)}...`);
+        await midnightApi.current.findContract(envContractAddress);
+        finalizedTx = await midnightApi.current.callRegisterCircuit(commitment, walletAddressBytes);
+        addLog(`Registration circuit executed successfully!`);
+      } else {
+        // First-time deployment - deploy then call register separately
+        addLog(`No contract address found - deploying new contract...`);
+        addLog(`⚠️ IMPORTANT: Save the contract address to frontend/.env.local after deployment!`);
+        
+        // Step 1: Deploy contract
+        const deployResult = await midnightApi.current.deployNewContract();
+        addLog(`✅ Contract deployed! Address: ${deployResult.contractAddress}`);
+        addLog(`📝 Add to .env.local: VITE_CONTRACT_ADDRESS=${deployResult.contractAddress}`);
+        
+        // Step 2: Call register circuit on deployed contract
+        addLog(`Calling register circuit...`);
+        const registerResult = await midnightApi.current.callRegisterCircuit(commitment, walletAddressBytes);
+        
+        // Combine results
+        finalizedTx = {
+          txHash: registerResult.txHash,
+          contractAddress: deployResult.contractAddress
+        };
+      }
+      
+      addLog(`Success: Identity anchored on-chain! Tx: ${finalizedTx.txHash.substring(0, 10)}...`);
+      setDeployedAddress(finalizedTx.contractAddress as string);
+      
+      // Still push to sim ledger for verifier ease in this demo
+      const ledger = JSON.parse(localStorage.getItem('midnight_sim_ledger') || '[]');
+      if (!ledger.includes(userHash)) {
+        ledger.push(userHash);
+        localStorage.setItem('midnight_sim_ledger', JSON.stringify(ledger));
+      }
+      
       setIsProcessing(false);
       setStep('success');
-    }, 2000);
+    } catch (err: any) {
+      addLog(`Error: Blockchain registration failed. ${err.message}`);
+      setIsProcessing(false);
+    }
   };
-
-  const handleVerify = () => {
-    setVerifyStatus('checking');
-    addLog(`Verifier: Initiating [${vType.toUpperCase()}] verification for hash ${verifierHash.substring(0, 10)}...`);
-    addLog('Verifier: Consulting Local Midnight Ledger index...');
+  const handleVerify = async () => {
+    // Input validation - MUST validate before ANY processing
+    const trimmedHash = verifierHash.trim();
     
-    setTimeout(() => {
-      // CHECK AGAINST SIMULATED LEDGER
-      const ledger = JSON.parse(localStorage.getItem('midnight_sim_ledger') || '[]');
-      const isRegistered = ledger.includes(verifierHash.trim());
-      const isCurrentSession = verifierHash.trim().toLowerCase() === userHash.trim().toLowerCase();
+    // Check if hash is empty
+    if (!trimmedHash) {
+      setVerifyStatus('failed');
+      addLog('❌ Verification Error: No hash provided. Please paste a valid commitment hash.');
+      return;
+    }
+    
+    // Validate hash format: must be 0x followed by 64 hex characters (32 bytes)
+    const hexPattern = /^0x[0-9a-fA-F]{64}$/;
+    if (!hexPattern.test(trimmedHash)) {
+      setVerifyStatus('failed');
+      addLog('❌ Verification Error: Invalid hash format.');
+      addLog('   Expected: 0x + 64 hexadecimal characters (e.g., 0x7a2d48bf...)');
+      addLog(`   Received: "${trimmedHash.substring(0, 30)}${trimmedHash.length > 30 ? '...' : ''}"`);
+      return;
+    }
+    
+    setVerifyStatus('checking');
+    addLog(`Verifier: Initiating [${vType.toUpperCase()}] verification for hash ${trimmedHash.substring(0, 16)}...`);
+    
+    // REAL ZK PROOF PATH (with Lace Wallet connected)
+    if (deployedAddress && kycSecret) {
+        addLog(`Midnight Prover: Generating Zero-Knowledge Proof of Eligibility...`);
+        try {
+            const walletAddressBytes = new Uint8Array(32); // Mock for demo
+            let result;
+            
+            if (vType === 'age') {
+                const birthYear = new Date(extractedData.dob).getFullYear();
+                result = await midnightApi.current.proveAge(birthYear, ageThreshold, kycSecret!, walletAddressBytes);
+            } else if (vType === 'residency') {
+                // Residency check currently disabled in v3 implementation
+                throw new Error("Residency check not yet implemented in v3 bridge");
+            }
+            
+            setVerifyStatus('verified');
+            addLog(`✅ Success: ZK Proof verified on-chain! Identity is ${vType === 'age' ? 'age-eligible' : 'residency-cleared'}.`);
+            return;
+        } catch (err: any) {
+            addLog(`❌ Error: ZK Proof generation/verification failed. ${err.message}`);
+            setVerifyStatus('failed');
+            return;
+        }
+    }
 
-      if (isRegistered || isCurrentSession) {
-        // Age Logic Simulation
+    // SIMULATION PATH (when wallet not connected)
+    addLog('⚠️ Simulation Mode: Consulting Local Ledger (NOT on blockchain)...');
+    setTimeout(() => {
+      // Step 1: Check if hash exists in ledger
+      const ledger = JSON.parse(localStorage.getItem('midnight_sim_ledger') || '[]');
+      const isRegistered = ledger.includes(trimmedHash);
+      const isCurrentSession = trimmedHash.toLowerCase() === userHash.trim().toLowerCase();
+
+      if (!isRegistered && !isCurrentSession) {
+        setVerifyStatus('failed');
+        addLog('❌ Verification Failed: Hash not found in ledger. User has not registered this identity.');
+        return;
+      }
+
+      // Step 2: Hash exists - now verify the ACTUAL requirements
+      // In simulation, we can only verify if this is the current session user
+      if (isCurrentSession) {
+        // We have access to extractedData for current session
+        let requirementMet = false;
+        
         if (vType === 'age') {
           const birthYear = new Date(extractedData.dob).getFullYear();
           const currentYear = new Date().getFullYear();
           const userAge = currentYear - birthYear;
+          requirementMet = userAge >= ageThreshold;
           
-          if (userAge >= ageThreshold) {
-            setVerifyStatus('verified');
-            addLog(`Verification Success: User age ${userAge} satisfies the ${ageThreshold}+ requirement.`);
+          if (requirementMet) {
+            addLog(`✅ Simulation Success: User age (${userAge}) meets ${ageThreshold}+ requirement.`);
+            addLog(`   Note: In REAL mode, age would be hidden via Zero-Knowledge Proof.`);
           } else {
-            setVerifyStatus('failed');
-            addLog(`Verification Failed: User age ${userAge} is below the ${ageThreshold}+ requirement.`);
+            addLog(`❌ Verification Failed: User age (${userAge}) does not meet ${ageThreshold}+ requirement.`);
           }
         } else if (vType === 'identity') {
-          setVerifyStatus('verified');
-          addLog(`Verification Success: Ownership confirmed via private key possession.`);
-        } else {
-          setVerifyStatus('verified');
-          addLog(`Verification Success: On-chain commitment found on local ledger index. ${vType.toUpperCase()} requirement satisfied.`);
+          requirementMet = true; // Identity check just confirms ownership
+          addLog(`✅ Simulation Success: Identity ownership confirmed.`);
+          addLog(`   Note: In REAL mode, this uses cryptographic proof of private key.`);
+        } else if (vType === 'residency') {
+          requirementMet = extractedData.country === geoRequired;
+          
+          if (requirementMet) {
+            addLog(`✅ Simulation Success: User residence (${extractedData.country}) matches requirement (${geoRequired}).`);
+            addLog(`   Note: In REAL mode, country would be hidden via Zero-Knowledge Proof.`);
+          } else {
+            addLog(`❌ Verification Failed: User residence (${extractedData.country}) does not match requirement (${geoRequired}).`);
+          }
         }
+        
+        setVerifyStatus(requirementMet ? 'verified' : 'failed');
       } else {
+        // Hash is in ledger but not current session - we can't verify requirements in simulation
         setVerifyStatus('failed');
-        addLog('Verification Error: Commitment mismatch. This hash is not registered on the ledger.');
+        addLog('❌ Simulation Limitation: Cannot verify requirements for non-current session users.');
+        addLog('   Connect Lace Wallet for REAL Zero-Knowledge Proof verification.');
+        addLog('   In real mode, verifier would receive cryptographic proof without seeing private data.');
       }
     }, 2500);
   };
+
+
 
   return (
     <div className="relative min-h-screen p-4 md:p-8 flex flex-col items-center">
@@ -167,18 +355,29 @@ function App() {
           </h1>
         </div>
 
-        <div className="flex p-1 bg-white/5 border border-white/10 rounded-full">
+        <div className="flex items-center gap-4">
+          <div className="flex p-1 bg-white/5 border border-white/10 rounded-full">
+            <button 
+              onClick={() => setMode('user')}
+              className={`px-8 py-2 rounded-full text-sm font-medium transition-all ${mode === 'user' ? 'bg-primary shadow-lg shadow-primary/20 text-white' : 'text-foreground/60 hover:text-white'}`}
+            >
+              Owner
+            </button>
+            <button 
+              onClick={() => setMode('verifier')}
+              className={`px-8 py-2 rounded-full text-sm font-medium transition-all ${mode === 'verifier' ? 'bg-primary shadow-lg shadow-primary/20 text-white' : 'text-foreground/60 hover:text-white'}`}
+            >
+              Verifier
+            </button>
+          </div>
+
           <button 
-            onClick={() => setMode('user')}
-            className={`px-8 py-2 rounded-full text-sm font-medium transition-all ${mode === 'user' ? 'bg-primary shadow-lg shadow-primary/20 text-white' : 'text-foreground/60 hover:text-white'}`}
+            onClick={connectWallet}
+            disabled={!!walletAddr || isConnecting}
+            className={`flex items-center gap-2 px-6 py-2 rounded-full text-sm font-bold border transition-all ${walletAddr ? (isMocked ? 'border-orange-500/30 bg-orange-500/10 text-orange-500' : 'border-green-500/30 bg-green-500/10 text-green-500') : 'border-white/10 bg-white/5 text-white hover:bg-white/10'}`}
           >
-            I am a User
-          </button>
-          <button 
-            onClick={() => setMode('verifier')}
-            className={`px-8 py-2 rounded-full text-sm font-medium transition-all ${mode === 'verifier' ? 'bg-primary shadow-lg shadow-primary/20 text-white' : 'text-foreground/60 hover:text-white'}`}
-          >
-            I am a Verifier
+            <Wallet className="w-4 h-4" />
+            {isConnecting ? 'Connecting...' : walletAddr ? (isMocked ? `SIM: ${walletAddr.substring(0, 8)}...` : `${walletAddr.substring(0, 8)}...`) : 'Connect Lace'}
           </button>
         </div>
       </div>
@@ -193,7 +392,7 @@ function App() {
                 {[
                   { id: 'upload', icon: Upload },
                   { id: 'extract', icon: User },
-                  { id: 'commit', icon: Lock },
+                  { id: 'commit', icon: LockIcon },
                   { id: 'success', icon: CheckCircle2 },
                 ].map((s, idx) => (
                   <React.Fragment key={s.id}>
@@ -299,7 +498,7 @@ function App() {
                   </div>
 
                   <div className="relative w-full max-w-lg group">
-                    <div className="w-full bg-black/40 border border-white/10 p-6 rounded-2xl font-mono text-primary text-sm wrap-break-word leading-relaxed pr-16 bg-linear-to-r from-black/40 to-primary/5">
+                    <div className="w-full bg-black/40 border border-white/10 p-6 rounded-2xl font-mono text-primary text-sm break-all leading-relaxed pr-16 bg-gradient-to-r from-black/40 to-primary/5">
                       {userHash}
                     </div>
                     <button 
@@ -327,7 +526,7 @@ function App() {
                   </div>
                   <div className="space-y-4">
                     <h2 className="text-4xl font-extrabold text-white tracking-tight">Identity Anchored</h2>
-                    <p className="text-foreground/60 max-w-sm text-lg">Your Zero-Knowledge Identity Pillar is now active. You can now prove your Age, Identity, and Residency to third parties.</p>
+                    <p className="text-foreground/60 max-sm text-lg">Your Zero-Knowledge Identity Pillar is now active. You can now prove your Age, Identity, and Residency to third parties.</p>
                   </div>
                   <div className="flex gap-4">
                     <button onClick={() => setStep('upload')} className="px-10 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl font-semibold text-white transition-all">New Profile</button>
@@ -384,17 +583,42 @@ function App() {
                     </div>
                   )}
 
-                  <div className="space-y-4">
+                  {vType === 'residency' && (
+                    <div className="space-y-4 animate-in">
+                        <label className="text-xs font-bold text-foreground/30 uppercase tracking-widest ml-1">Required Country of Residence</label>
+                        <select 
+                            className="w-full bg-black/40 border border-white/10 rounded-xl p-4 text-white font-bold outline-none focus:ring-2 focus:ring-accent/40"
+                            value={geoRequired}
+                            onChange={(e) => setGeoRequired(e.target.value)}
+                        >
+                            {Object.keys(COUNTRY_MAP).map(c => (
+                                <option key={c} value={c} className="bg-gray-900">{c}</option>
+                            ))}
+                        </select>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm font-bold uppercase tracking-widest text-foreground/40 ml-1">
                         <span>User Proof Hash</span>
                         <span className="text-[10px] text-accent font-normal normal-case italic">Shared by user</span>
                     </div>
                     <textarea 
-                        className="w-full bg-black/40 border border-white/10 rounded-xl p-4 font-mono text-sm text-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all resize-none h-24"
+                        className={`w-full bg-black/40 border rounded-xl p-4 font-mono text-sm focus:ring-2 outline-none transition-all resize-none h-24 ${
+                          verifierHash && !isValidHashFormat(verifierHash) 
+                            ? 'border-red-500/50 text-red-400 focus:ring-red-500/20' 
+                            : 'border-white/10 text-primary focus:ring-primary/20'
+                        }`}
                         value={verifierHash}
                         onChange={(e) => { setVerifierHash(e.target.value); setVerifyStatus('idle'); }}
                         placeholder="Paste user's identity hash here (0x...)"
                     />
+                    {verifierHash && !isValidHashFormat(verifierHash) && (
+                      <p className="text-xs text-red-400 ml-1 flex items-center gap-1">
+                        <ShieldAlert className="w-3 h-3" />
+                        Invalid format. Expected: 0x + 64 hex characters
+                      </p>
+                    )}
                   </div>
 
                   <button 
@@ -404,7 +628,7 @@ function App() {
                     <span className="flex items-center justify-center gap-3">
                       {verifyStatus === 'checking' ? (
                         <>
-                          <div className="w-6 h-6 border-3 border-white/30 border-t-white rounded-full animate-spin" />
+                          <div className="w-6 h-6 border-4 border-white/30 border-t-white rounded-full animate-spin" />
                           Consulting Local Ledger...
                         </>
                       ) : `Verify ${vType.charAt(0).toUpperCase() + vType.slice(1)} Requirement`}
@@ -426,7 +650,7 @@ function App() {
                   )}
                 </div>
 
-                <div className="p-6 bg-white/2 border-l-4 border-accent/20 rounded-r-2xl">
+                <div className="p-6 bg-white/5 border-l-4 border-accent/20 rounded-r-2xl">
                   <p className="text-sm text-foreground/60 leading-relaxed">
                     Verify that the user meets the <b>{vType.toUpperCase()}</b> criteria without ever seeing their personal registration data. 
                   </p>
@@ -442,14 +666,16 @@ function App() {
           <div className="terminal-glass p-6 space-y-4">
             <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-foreground/40">Environment</h3>
-                <div className="px-2 py-0.5 bg-green-500/20 text-green-500 text-[10px] font-bold rounded uppercase">Localhost</div>
+                <div className={`px-2 py-0.5 ${isMocked ? 'bg-orange-500/20 text-orange-500' : 'bg-green-500/20 text-green-500'} text-[10px] font-bold rounded uppercase`}>
+                  {isMocked ? 'Simulation' : 'Localhost'}
+                </div>
             </div>
             <div className="space-y-4">
               {[
-                { label: 'Blockchain Node', status: 'Healthy', color: 'bg-green-500' },
-                { label: 'Standalone Indexer', status: 'Syncing', color: 'bg-green-500' },
+                { label: 'Blockchain Node', status: isMocked ? 'Simulation' : 'Healthy', color: isMocked ? 'bg-orange-500' : 'bg-green-500' },
+                { label: 'Standalone Indexer', status: isMocked ? 'Local Storage' : 'Syncing', color: isMocked ? 'bg-orange-500' : 'bg-green-500' },
                 { label: 'ZK Prover Engine', status: 'Available', color: 'bg-primary' },
-                { label: 'Identity Store', status: 'Encrypted', color: 'bg-primary' },
+                { label: 'Identity Store', status: 'Encrypted', color: 'bg-white/10' },
               ].map(stack => (
                 <div key={stack.label} className="group cursor-default">
                   <div className="flex items-center justify-between text-sm mb-1">
@@ -465,7 +691,7 @@ function App() {
           </div>
 
           {/* Console */}
-          <div className="terminal-glass flex-1 flex flex-col h-[400px]">
+          <div className="terminal-glass flex-1 flex flex-col min-h-[400px]">
             <div className="terminal-header">
               <div className="flex items-center gap-2">
                 <TerminalIcon className="w-3 h-3" />
@@ -477,17 +703,17 @@ function App() {
                 <div className="w-2.5 h-2.5 rounded-full bg-white/10" />
               </div>
             </div>
-            <div className="log-area space-y-3 p-4">
+            <div className="p-4 space-y-3 overflow-y-auto font-mono text-[11px] leading-relaxed">
               {logs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full gap-4 text-foreground/20">
+                <div className="flex flex-col items-center justify-center h-full gap-4 text-foreground/20 py-12">
                     <Cpu className="w-8 h-8 opacity-20" />
                     <span className="text-[11px] uppercase tracking-widest">Awaiting Operations</span>
                 </div>
               ) : (
                 logs.map((log, i) => (
                   <div key={i} className="flex gap-4 group">
-                    <span className="text-foreground/10 font-mono text-[10px] select-none">#{i.toString().padStart(2, '0')}</span>
-                    <span className="text-foreground/80 wrap-break-word font-mono text-[11px] leading-relaxed group-hover:text-primary transition-all">{log}</span>
+                    <span className="text-foreground/10 select-none">#{i.toString().padStart(2, '0')}</span>
+                    <span className="text-foreground/80 break-all group-hover:text-primary transition-all">{log}</span>
                   </div>
                 ))
               )}

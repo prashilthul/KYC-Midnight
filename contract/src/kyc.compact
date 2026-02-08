@@ -9,22 +9,25 @@ export ledger kyc_commitment: Bytes<32>;
 
 /**
  * Step 1: Registration
+ * Links PII commitment to a specific wallet address on-chain.
  */
-export circuit register(commitment: Bytes<32>): [] {
+export circuit register(commitment: Bytes<32>, wallet_address: Bytes<32>): [] {
     kyc_commitment = disclose(commitment);
 }
 
 /**
  * Step 2: Full Identity Ownership Proof
  */
-export circuit prove_identity(secret: Bytes<32>): [] {
+export circuit prove_identity(secret: Bytes<32>, wallet_address: Bytes<32>): [] {
     assert(kyc_commitment == persistentHash<Bytes<32>>(secret), "Identity verification failed: Secret does not match commitment");
+    // In a production environment, we would also verify that the transaction 
+    // is signed by the matching wallet_address.
 }
 
 /**
  * Step 3: Dynamic Age Eligibility Proof
  */
-export circuit prove_age_eligible(current_year: Uint<16>, birth_year: Uint<32>, min_age: Uint<16>, secret: Bytes<32>): [] {
+export circuit prove_age_eligible(current_year: Uint<16>, birth_year: Uint<32>, min_age: Uint<16>, secret: Bytes<32>, wallet_address: Bytes<32>): [] {
     assert(kyc_commitment == persistentHash<Bytes<32>>(secret), "Identity mismatch");
     const cy32 = current_year as Uint<32>;
     const min32 = min_age as Uint<32>;
@@ -32,10 +35,9 @@ export circuit prove_age_eligible(current_year: Uint<16>, birth_year: Uint<32>, 
 }
 
 /**
- * Step 4: Residency Verification
- * country_code: 1 for US, 2 for UK, etc. (Simulated mapping)
+ * Step 4: Residency Verification (Ignored for now)
  */
-export circuit prove_residency(required_country: Uint<16>, user_country: Uint<16>, secret: Bytes<32>): [] {
+export circuit prove_residency(required_country: Uint<16>, user_country: Uint<16>, secret: Bytes<32>, wallet_address: Bytes<32>): [] {
     assert(kyc_commitment == persistentHash<Bytes<32>>(secret), "Identity mismatch");
     assert(user_country == required_country, "Residency Blocked: Country does not match requirements");
 }

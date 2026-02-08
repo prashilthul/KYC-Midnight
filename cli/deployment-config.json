@@ -1,0 +1,20 @@
+{
+  "status": "CONFIGURATION_READY",
+  "network": "local",
+  "walletSeedReference": "00000000...00000001",
+  "sampleCommitment": "669ec8b04618231f8d038d71071a84672525cc8defbed2337d6d0ae5c2ee2e73",
+  "deployedAt": "2026-02-08T11:49:32.861Z",
+  "config": {
+    "indexerUrl": "http://localhost:8088",
+    "indexerWebsocketUrl": "ws://localhost:8088/ws",
+    "midnightNodeUrl": "http://localhost:9944",
+    "proofServerUrl": "http://localhost:6300"
+  },
+  "instructions": [
+    "This is a configuration template.",
+    "For actual deployment:",
+    "  Option 1: Use the frontend with Lace Wallet",
+    "  Option 2: Implement full wallet SDK following Midnight starter pattern",
+    "  Option 3: Reference: https://docs.midnight.network/getting-started/deploy-mn-app"
+  ]
+}
