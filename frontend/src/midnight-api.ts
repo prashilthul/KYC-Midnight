@@ -1,4 +1,13 @@
-// midnight-api.ts - Refactored to follow Echo reference pattern
+/**
+ * KYC Platform - Midnight API Integration
+ */
+
+export interface PII {
+  fullName: string;
+  birthYear: number;
+  country: string;
+  secret: string;
+}
 
 export interface RegisterResult {
     txHash: string;
@@ -14,8 +23,23 @@ export interface MidnightWalletAPI {
   }>;
   submitTransaction(tx: unknown): Promise<any>;
   balanceUnsealedTransaction(tx: unknown): Promise<any>;
+  proveTransaction(tx: unknown): Promise<any>; // Manual flow method
   getConfiguration(): Promise<any>;
 }
+
+const hexToBytes = (hex: string): Uint8Array => {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+};
+
+const hashCountry = async (c: string): Promise<Uint8Array> => {
+  const msg = new TextEncoder().encode(c.toLowerCase().trim());
+  const hash = await window.crypto.subtle.digest('SHA-256', msg);
+  return new Uint8Array(hash);
+};
 
 export class MidnightDAppAPI {
   private kycModule: any = null;
@@ -29,6 +53,9 @@ export class MidnightDAppAPI {
 
   /** Initialize the API with the Lace wallet instance */
   async initialize(walletAPI: MidnightWalletAPI) {
+    const { setNetworkId } = await import("@midnight-ntwrk/midnight-js-network-id");
+    setNetworkId('undeployed');
+    
     this.wallet = walletAPI;
     this.config = await walletAPI.getConfiguration();
 
@@ -40,7 +67,8 @@ export class MidnightDAppAPI {
         indexer: this.config.indexerUri,
         indexerWS: this.config.indexerWsUri,
         node: this.config.substrateNodeUri,
-        proofServer: this.config.proverServerUri,
+        // Use the Vite proxy with origin to satisfy new URL() parser
+        proofServer: `${window.location.origin}/api/proof-server/`, 
       },
       contractName: "kyc",
       wallet: walletAPI,
@@ -55,112 +83,114 @@ export class MidnightDAppAPI {
     }
 
     const { CompiledContract } = await import("@midnight-ntwrk/compact-js");
-
-    // Match CLI pattern: use withVacantWitnesses
-    // Browser zkConfigProvider (in providers.ts) loads ZK assets via fetch
+    
+    // @ts-ignore
     this.kycCompiledContract = (CompiledContract.make(
       "kyc",
       this.kycModule.Contract,
     ) as any).pipe(
-      (self: any) => (CompiledContract as any).withVacantWitnesses(self)
+      (self: any) => (CompiledContract as any).withVacantWitnesses(self),
+      (self: any) => (CompiledContract as any).withCompiledFileAssets(self, "/")
     );
-
-    console.log("Midnight API initialized with Echo-style providers.");
   }
 
   /** Connect to an existing deployed contract */
   async findContract(contractAddress: string) {
     if (!this.providers) throw new Error("API not initialized");
-    
     const { findDeployedContract } = await import("@midnight-ntwrk/midnight-js-contracts");
-
-    this.kycContract = await findDeployedContract(this.providers, {
-      compiledContract: this.kycCompiledContract,
-      contractAddress: contractAddress,
-      privateStateId: "kycPrivateState",
-      initialPrivateState: {},
-    } as any);
-    
-    console.log(`Connected to KYC contract at: ${contractAddress}`);
-  }
-
-  /** Deploy a new contract instance */
-  async deployNewContract(): Promise<{ contractAddress: string }> {
-    if (!this.providers) throw new Error("API not initialized");
-
-    const { deployContract } = await import("@midnight-ntwrk/midnight-js-contracts");
-
-    console.log('=== STARTING CONTRACT DEPLOYMENT ===');
-    console.log('1. Loading compiled contract...');
-    console.log('   - Compiled contract ready:', !!this.kycCompiledContract);
-    
-    console.log('2. Preparing providers...');
-    console.log('   - Private state provider:', !!this.providers.privateStateProvider);
-    console.log('   - Public data provider:', !!this.providers.publicDataProvider);
-    console.log('   - ZK config provider:', !!this.providers.zkConfigProvider);
-    console.log('   - Proof provider:', !!this.providers.proofProvider);
-    console.log('   - Wallet provider:', !!this.providers.walletProvider);
-    console.log('   - Midnight provider:', !!this.providers.midnightProvider);
-    
-    console.log('3. Calling deployContract (this may take 30+ seconds)...');
-    console.time('Contract Deployment');
     
     try {
-      const deployed = await deployContract(this.providers, {
+      this.kycContract = await findDeployedContract(this.providers, {
         compiledContract: this.kycCompiledContract,
+        contractAddress: contractAddress.trim(), // Ensure no whitespace
         privateStateId: "kycPrivateState",
         initialPrivateState: {},
       } as any);
+    } catch (e: any) {
+      throw e;
+    }
+  }
+
+  /** Deploy a new contract instance */
+  async deployNewContract(): Promise<any> {
+    const { deployContract } = await import("@midnight-ntwrk/midnight-js-contracts");
+    const { CompiledContract } = await import("@midnight-ntwrk/compact-js");
+
+    try {
+      const deployed = await deployContract(this.providers, {
+        privateStateId: "kycPrivateState",
+        compiledContract: this.kycCompiledContract,
+        initialPrivateState: {},
+      } as any);
       
-      console.timeEnd('Contract Deployment');
-      console.log('4. ✅ Contract deployed successfully!');
-
       this.kycContract = deployed;
-      const address = deployed.deployTxData.public.contractAddress;
-      console.log('   - Contract address:', address);
-      console.log('   - Deploy TX hash:', deployed.deployTxData.public.txHash);
-      console.log('=== DEPLOYMENT COMPLETE ===');
-
-      return { contractAddress: address };
+      
+      return {
+        contractAddress: deployed.deployTxData.public.contractAddress,
+        txHash: deployed.deployTxData.public.txHash,
+      };
     } catch (error: any) {
-      console.timeEnd('Contract Deployment');
-      console.error('❌ DEPLOYMENT FAILED');
-      console.error('→ Error:', error.message);
-      console.error('→ Type:', error.name);
-      if (error.stack) {
-        console.error('→ Stack (first 10 lines):');
-        console.error(error.stack.split('\n').slice(0, 10).join('\n'));
-      }
       throw error;
     }
   }
 
   /** Call the register circuit on the connected contract */
-  async callRegisterCircuit(commitment: Uint8Array, walletAddress: Uint8Array): Promise<RegisterResult> {
+  async callRegisterCircuit(pii: PII, walletAddress: Uint8Array): Promise<RegisterResult> {
     if (!this.kycContract) throw new Error("No contract connected");
 
-    console.log("Generating ZK proof and submitting registration...");
-    const tx = await this.kycContract.callTx.register(commitment, walletAddress);
-    const finalized = await this.providers.midnightProvider.submitTx(tx);
+    const countryHash = await hashCountry(pii.country);
+    const identitySecret = hexToBytes(pii.secret);
+
+    const identity = {
+      birth_year: BigInt(pii.birthYear),
+      country_hash: countryHash,
+      secret: identitySecret
+    };
     
+    // @ts-ignore
+    const result = await this.kycContract.callTx.register(identity, new Uint8Array(walletAddress));
+    
+    const txHash = result.public?.txId || result.txHash || "tx_completed";
+    const contractAddr = this.kycContract.deployTxData?.public?.contractAddress || 
+                         this.kycContract.contractAddress || 
+                         "unknown_address";
+
     return {
-      txHash: finalized.txHash || finalized.public?.txId || "tx_pending",
-      contractAddress: this.kycContract.deployTxData.public.contractAddress
+      txHash: txHash,
+      contractAddress: contractAddr
     };
   }
   
   /** Prove age eligibility without revealing exact birth year */
-  async proveAge(birthYear: number, minAge: number, secret: Uint8Array, walletAddress: Uint8Array) {
+  async proveAge(pii: PII, walletAddress: Uint8Array) {
     if (!this.kycContract) throw new Error("No contract connected");
 
     const currentYear = BigInt(new Date().getFullYear());
-    const result = await this.kycContract.callTx.prove_age_eligible(
-        currentYear, 
-        BigInt(birthYear), 
-        BigInt(minAge), 
-        secret, 
-        walletAddress
-    );
+    const minAge = 18n;
+    const identity = {
+      birth_year: BigInt(pii.birthYear),
+      country_hash: await hashCountry(pii.country),
+      secret: hexToBytes(pii.secret)
+    };
+
+    // @ts-ignore
+    const result = await this.kycContract.callTx.prove_age_eligible(currentYear, minAge, identity, new Uint8Array(walletAddress));
+    return result.public;
+  }
+
+  /** Prove residency in a specific country */
+  async proveResidency(pii: PII, walletAddress: Uint8Array) {
+    if (!this.kycContract) throw new Error("No contract connected");
+
+    const requiredCountryHash = await hashCountry(pii.country);
+    const identity = {
+      birth_year: BigInt(pii.birthYear),
+      country_hash: await hashCountry(pii.country),
+      secret: hexToBytes(pii.secret)
+    };
+
+    // @ts-ignore
+    const result = await this.kycContract.callTx.prove_residency(requiredCountryHash, identity, new Uint8Array(walletAddress));
     return result.public;
   }
 }

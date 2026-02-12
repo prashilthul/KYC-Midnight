@@ -20,18 +20,18 @@ export class UndeployedConfig implements Config {
   readonly proofServerUrl: string;
 
   constructor() {
-    this.midnightNodeUrl = process.env.MIDNIGHT_NODE_URL || 'http://localhost:9944';
-    this.indexerUrl = process.env.INDEXER_URL || 'http://localhost:8088';
-    this.indexerWebsocketUrl = process.env.INDEXER_WS_URL || 'ws://localhost:8088/ws';
-    this.proofServerUrl = process.env.PROOF_SERVER_URL || 'http://localhost:6300';
+    this.midnightNodeUrl = process.env.MIDNIGHT_NODE_URL || 'http://127.0.0.1:9944';
+    this.indexerUrl = process.env.INDEXER_URL || 'http://127.0.0.1:8088/api/v3/graphql';
+    this.indexerWebsocketUrl = process.env.INDEXER_WS_URL || 'ws://127.0.0.1:8088/api/v3/graphql/ws';
+    this.proofServerUrl = process.env.PROOF_SERVER_URL || 'http://127.0.0.1:6300';
   }
 }
 
 export const localConfig: Config = {
-  midnightNodeUrl: 'http://localhost:9944',
-  indexerUrl: 'http://localhost:8088',
-  indexerWebsocketUrl: 'ws://localhost:8088/ws',
-  proofServerUrl: 'http://localhost:6300',
+  midnightNodeUrl: 'http://127.0.0.1:9944',
+  indexerUrl: 'http://127.0.0.1:8088/api/v3/graphql',
+  indexerWebsocketUrl: 'ws://127.0.0.1:8088/api/v3/graphql/ws',
+  proofServerUrl: 'http://127.0.0.1:6300',
 };
 
 export const preprodConfig: Config = {

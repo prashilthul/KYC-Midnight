@@ -9,7 +9,7 @@ import * as bip39 from 'bip39';
 import type { CombinedTokenTransfer } from '@midnight-ntwrk/wallet-sdk-facade';
 
 export const DEFAULT_LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
-export const TRANSFER_AMOUNT = 31_337_000_000n; // 1e12, adjust as needed
+export const TRANSFER_AMOUNT = 156_685_000_000n; // 1e12, adjust as needed
 
 export type WalletBundle = Awaited<ReturnType<typeof initWalletWithSeed>>;
 

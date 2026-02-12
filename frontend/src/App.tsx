@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MidnightDAppAPI } from './midnight-api';
+import { MidnightDAppAPI, PII } from './midnight-api';
 import { 
   ShieldCheck, 
   Upload, 
@@ -21,8 +21,15 @@ import {
   EyeOff,
   Lock as LockIcon,
   Terminal as TerminalIcon,
-  ExternalLink
+  ExternalLink,
+  X
 } from 'lucide-react';
+import { 
+  MidnightBech32m, 
+  UnshieldedAddress, 
+  ShieldedCoinPublicKey,
+  ShieldedEncryptionPublicKey
+} from '@midnight-ntwrk/wallet-sdk-address-format';
 
 type Mode = 'user' | 'verifier';
 type Step = 'upload' | 'extract' | 'commit' | 'success';
@@ -31,12 +38,16 @@ type VerificationType = 'age' | 'identity' | 'residency';
 function App() {
   const [mode, setMode] = useState<Mode>('user');
   const [step, setStep] = useState<Step>('upload');
-  const [extractedData, setExtractedData] = useState({ name: '', dob: '', idNumber: '', country: 'United States' });
+  const [extractedData, setExtractedData] = useState({ name: '', dob: '', country: 'india' });
+  const [pii, setPii] = useState<PII | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const logEndRef = useRef<HTMLDivElement>(null);
-  const [userHash, setUserHash] = useState('0x7a2d48bf6e9a4c12d00d2f8e9a4c12d00d2f8e9a4c12d00d2f8e9a4c12d00d2');
+  const [userHash, setUserHash] = useState('');
   const [hasCopied, setHasCopied] = useState(false);
+  const [showSecretModal, setShowSecretModal] = useState(false);
+  const [tempSecret, setTempSecret] = useState('');
+  const [pendingVerification, setPendingVerification] = useState<{ type: VerificationType } | null>(null);
 
   // Verifier State
   const [verifierHash, setVerifierHash] = useState('');
@@ -44,11 +55,12 @@ function App() {
   const [verifyStatus, setVerifyStatus] = useState<'idle' | 'checking' | 'verified' | 'failed'>('idle');
   const [ageThreshold, setAgeThreshold] = useState(18);
   const [walletAddr, setWalletAddr] = useState<string | null>(null);
+  const [coinPublicKey, setCoinPublicKey] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isMocked, setIsMocked] = useState(false);
-  const [geoRequired, setGeoRequired] = useState('United States');
+  const [geoRequired, setGeoRequired] = useState('india');
   const [deployedAddress, setDeployedAddress] = useState<string | null>(null);
-  const [kycSecret, setKycSecret] = useState<Uint8Array | null>(null);
+  const [manualAddress, setManualAddress] = useState('');
   const midnightApi = useRef<MidnightDAppAPI>(new MidnightDAppAPI());
 
   const COUNTRY_MAP: Record<string, number> = {
@@ -84,14 +96,31 @@ function App() {
       addLog('System: Requesting connection from Lace...');
       const walletAPI = await midnight.mnLace.connect('undeployed');
       
-      const { shieldedAddress } = await walletAPI.getShieldedAddresses();
+      const { unshieldedAddress } = await walletAPI.getUnshieldedAddress();
+      
+      // BIT-PERFECT LOGIC: Forged Transparent Pivot
+      // 1. Decode generic Bech32 address
+      const decodedBech32 = MidnightBech32m.parse(unshieldedAddress);
+      
+      // 2. Extract bit-perfect 32-byte public key using SDK codec
+      const unshieldedAddr = UnshieldedAddress.codec.decode(decodedBech32.network, decodedBech32);
+      const clean32Bytes = unshieldedAddr.data;
+      
+      // 3. Re-encode as BOTH brands to satisfy distinct SDK requirements
+      const shieldedCPK = new ShieldedCoinPublicKey(clean32Bytes);
+      const forgedCPK = ShieldedCoinPublicKey.codec.encode(decodedBech32.network, shieldedCPK).asString();
+      
+      const shieldedEPK = new ShieldedEncryptionPublicKey(clean32Bytes);
+      const forgedEPK = ShieldedEncryptionPublicKey.codec.encode(decodedBech32.network, shieldedEPK).asString();
       
       // Initialize Midnight API with the connected wallet
       await midnightApi.current.initialize(walletAPI);
       
-      setWalletAddr(shieldedAddress);
+      setWalletAddr(unshieldedAddress);
+      setCoinPublicKey(forgedCPK); // Use CPK for tx scoping
       setIsMocked(false);
-      addLog(`Wallet Connected: ${shieldedAddress.substring(0, 10)}... (Real Connection)`);
+      addLog(`Wallet Connected: ${unshieldedAddress.substring(0, 10)}... (Transparent Identity)`);
+      addLog(`Identity re-tagged: CPK (${forgedCPK.substring(0, 15)}...) & EPK (${forgedEPK.substring(0, 15)}...)`);
       setIsConnecting(false);
     } catch (err: any) {
       if (err.message === 'EXTENSION_MISSING') {
@@ -112,7 +141,6 @@ function App() {
   const copyToClipboard = () => {
     navigator.clipboard.writeText(userHash);
     setHasCopied(true);
-    addLog('System: Hash copied to clipboard.');
     setTimeout(() => setHasCopied(false), 2000);
   };
 
@@ -123,7 +151,7 @@ function App() {
       addLog(`File attached: ${e.target.files[0].name}`);
       addLog('Secure Sandbox: Processing document locally...');
       setTimeout(() => {
-        setExtractedData({ name: 'Satoshi Nakamoto', dob: '1975-04-05', idNumber: 'IDX-992-001', country: 'United States' });
+        setExtractedData({ name: 'Satoshi Nakamoto', dob: '1975-04-05', country: 'india' });
         addLog('OCR Engine: PII extraction successful.');
         setIsProcessing(false);
         setStep('extract');
@@ -131,17 +159,27 @@ function App() {
     }
   };
 
-  // --- Real Hashing Logic (SubtleCrypto) ---
-  const calculateHash = async () => {
+  const preparePII = async () => {
     setIsProcessing(true);
-    addLog('System: Generating Zero-Knowledge commitment secret...');
-    const secret = window.crypto.getRandomValues(new Uint8Array(32));
-    setKycSecret(secret);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', secret);
-    const hashHex = '0x' + Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    addLog('System: Generating secure identity secret...');
+    
+    const secretBytes = window.crypto.getRandomValues(new Uint8Array(32));
+    const secretHex = Array.from(secretBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    const birthYear = new Date(extractedData.dob).getFullYear();
+    
+    const newPII = {
+      fullName: extractedData.name,
+      birthYear: birthYear,
+      country: extractedData.country.toLowerCase().trim(),
+      secret: secretHex
+    };
+    
+    setPii(newPII);
+    
+    // In the real contract, the "commitment" is the hash of this struct
+    // For the UI display, we'll just show it's ready
     setTimeout(() => {
-      setUserHash(hashHex);
-      addLog("System: Commitment generated: " + hashHex.substring(0, 16) + "...");
+      addLog("System: Identity object prepared and encrypted.");
       setIsProcessing(false);
       setStep('commit');
     }, 1200);
@@ -167,60 +205,61 @@ function App() {
         addLog(`Simulation Complete: Hash stored locally (not on Midnight blockchain)`);
         setIsProcessing(false);
         setStep('success');
-      }, 1500);
+  }, 1500);
       return;
     }
     
-    // Real blockchain deployment path
-    addLog('Midnight Prover: Generating ZK proof for commitment ownership...');
-    addLog(`Midnight Node: Submitting registration transaction to local ledger...`);
-    
+    if (!pii) throw new Error("PII data missing");
+
     try {
-      // Convert userHash (from calculation) back to Uint8Array for the circuit
-      const commitment = new Uint8Array(userHash.replace('0x', '').match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
-      const walletAddressBytes = new Uint8Array(32); // Mocked for now, in real it should match the wallet
+      // Robust Address parser
+      const parseAddress = (input: string) => {
+          if (input.startsWith('mn_')) {
+              const decoded = MidnightBech32m.parse(input);
+              if (decoded.type === 'addr') {
+                  return new Uint8Array(UnshieldedAddress.codec.decode(decoded.network, decoded).data);
+              } else if (decoded.type === 'shield-cpk') {
+                  return new Uint8Array(ShieldedCoinPublicKey.codec.decode(decoded.network, decoded).data);
+              } else if (decoded.type === 'shield-epk') {
+                  return new Uint8Array(ShieldedEncryptionPublicKey.codec.decode(decoded.network, decoded).data);
+              }
+              return new Uint8Array(decoded.data);
+          }
+          throw new Error("Invalid address format");
+      };
+
+      if (!coinPublicKey) throw new Error("Wallet Identity not found");
+      const walletAddressBytes = parseAddress(coinPublicKey);
       
-      // Check if contract address exists in environment
-      const envContractAddress = (import.meta as any).env?.VITE_CONTRACT_ADDRESS;
+      // Check if contract address exists in environment or manual input
+      const envContractAddress = manualAddress.trim() || (import.meta as any).env?.VITE_CONTRACT_ADDRESS;
       
       let finalizedTx;
       
       if (envContractAddress && envContractAddress.trim() !== '') {
-        // Connect to existing contract and call register circuit
         addLog(`Connecting to deployed contract: ${envContractAddress.substring(0, 10)}...`);
-        await midnightApi.current.findContract(envContractAddress);
-        finalizedTx = await midnightApi.current.callRegisterCircuit(commitment, walletAddressBytes);
-        addLog(`Registration circuit executed successfully!`);
+        try {
+          await midnightApi.current.findContract(envContractAddress);
+          finalizedTx = await midnightApi.current.callRegisterCircuit(pii, walletAddressBytes);
+          addLog(`Registration circuit executed successfully!`);
+        } catch (findErr: any) {
+          if (findErr.message?.includes('mismatched verifier keys')) {
+            addLog(`❌ Version Mismatch: Your local contract does not match the one at ${envContractAddress.substring(0, 8)}...`);
+            addLog(`💡 Tip: Clear VITE_CONTRACT_ADDRESS in .env.local and reload to redeploy.`);
+            throw new Error("CONTRACT_VERSION_MISMATCH");
+          }
+          throw findErr;
+        }
       } else {
-        // First-time deployment - deploy then call register separately
         addLog(`No contract address found - deploying new contract...`);
-        addLog(`⚠️ IMPORTANT: Save the contract address to frontend/.env.local after deployment!`);
-        
-        // Step 1: Deploy contract
         const deployResult = await midnightApi.current.deployNewContract();
         addLog(`✅ Contract deployed! Address: ${deployResult.contractAddress}`);
-        addLog(`📝 Add to .env.local: VITE_CONTRACT_ADDRESS=${deployResult.contractAddress}`);
-        
-        // Step 2: Call register circuit on deployed contract
-        addLog(`Calling register circuit...`);
-        const registerResult = await midnightApi.current.callRegisterCircuit(commitment, walletAddressBytes);
-        
-        // Combine results
-        finalizedTx = {
-          txHash: registerResult.txHash,
-          contractAddress: deployResult.contractAddress
-        };
+        finalizedTx = await midnightApi.current.callRegisterCircuit(pii, walletAddressBytes);
       }
       
       addLog(`Success: Identity anchored on-chain! Tx: ${finalizedTx.txHash.substring(0, 10)}...`);
       setDeployedAddress(finalizedTx.contractAddress as string);
-      
-      // Still push to sim ledger for verifier ease in this demo
-      const ledger = JSON.parse(localStorage.getItem('midnight_sim_ledger') || '[]');
-      if (!ledger.includes(userHash)) {
-        ledger.push(userHash);
-        localStorage.setItem('midnight_sim_ledger', JSON.stringify(ledger));
-      }
+      setUserHash("0x" + pii.secret.substring(0, 32) + "..."); // Pseudo-view for UI
       
       setIsProcessing(false);
       setStep('success');
@@ -254,28 +293,10 @@ function App() {
     addLog(`Verifier: Initiating [${vType.toUpperCase()}] verification for hash ${trimmedHash.substring(0, 16)}...`);
     
     // REAL ZK PROOF PATH (with Lace Wallet connected)
-    if (deployedAddress && kycSecret) {
-        addLog(`Midnight Prover: Generating Zero-Knowledge Proof of Eligibility...`);
-        try {
-            const walletAddressBytes = new Uint8Array(32); // Mock for demo
-            let result;
-            
-            if (vType === 'age') {
-                const birthYear = new Date(extractedData.dob).getFullYear();
-                result = await midnightApi.current.proveAge(birthYear, ageThreshold, kycSecret!, walletAddressBytes);
-            } else if (vType === 'residency') {
-                // Residency check currently disabled in v3 implementation
-                throw new Error("Residency check not yet implemented in v3 bridge");
-            }
-            
-            setVerifyStatus('verified');
-            addLog(`✅ Success: ZK Proof verified on-chain! Identity is ${vType === 'age' ? 'age-eligible' : 'residency-cleared'}.`);
-            return;
-        } catch (err: any) {
-            addLog(`❌ Error: ZK Proof generation/verification failed. ${err.message}`);
-            setVerifyStatus('failed');
-            return;
-        }
+    if (deployedAddress && pii) {
+        setPendingVerification({ type: vType });
+        setShowSecretModal(true);
+        return;
     }
 
     // SIMULATION PATH (when wallet not connected)
@@ -338,8 +359,78 @@ function App() {
 
 
 
+  const handleConfirmSecret = async () => {
+    if (!pendingVerification || !pii) return;
+    
+    // Check if secret matches
+    if (tempSecret !== pii.secret) {
+      addLog('❌ Error: Identity Secret mismatch. Verification aborted.');
+      setVerifyStatus('failed');
+      setShowSecretModal(false);
+      return;
+    }
+
+    setShowSecretModal(false);
+    setVerifyStatus('checking');
+    addLog(`Midnight Prover: Generating Proof of ${pendingVerification.type.toUpperCase()}...`);
+
+    try {
+      const decodedBech32 = MidnightBech32m.parse(coinPublicKey!);
+      const walletAddressBytes = new Uint8Array(UnshieldedAddress.codec.decode(decodedBech32.network, decodedBech32).data);
+      
+      let result;
+      if (pendingVerification.type === 'age') {
+        result = await midnightApi.current.proveAge(pii, walletAddressBytes);
+      } else if (pendingVerification.type === 'residency') {
+        result = await midnightApi.current.proveResidency(pii, walletAddressBytes);
+      }
+      
+      setVerifyStatus('verified');
+      addLog(`✅ Success: ZK Proof verified on-chain!`);
+    } catch (err: any) {
+      const match = err.message.match(/failed assert: (.*)/);
+      const friendlyError = match ? match[1] : err.message;
+      addLog(`❌ VERIFICATION REJECTED: ${friendlyError}`);
+      setVerifyStatus('failed');
+    }
+  };
+
   return (
     <div className="relative min-h-screen p-4 md:p-8 flex flex-col items-center">
+      {/* Secret Modal */}
+      {showSecretModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in">
+          <div className="glass max-w-md w-full p-8 space-y-6 relative border border-primary/30 shadow-[0_0_50px_rgba(var(--primary-rgb),0.2)]">
+            <button 
+              onClick={() => setShowSecretModal(false)}
+              className="absolute right-4 top-4 p-2 hover:bg-white/5 rounded-full transition-all text-foreground/40 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="space-y-2 text-center">
+              <div className="w-16 h-16 bg-primary/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <LockIcon className="w-8 h-8 text-primary" />
+              </div>
+              <h3 className="text-xl font-bold text-white">Confirm Identity Secret</h3>
+              <p className="text-sm text-foreground/60">Please enter your 64-character hex secret to authorize ZK proof generation.</p>
+            </div>
+            <div className="space-y-4">
+              <textarea 
+                className="w-full bg-black/40 border border-white/10 rounded-xl p-4 font-mono text-sm focus:ring-2 focus:ring-primary/20 outline-none text-primary transition-all resize-none h-24"
+                placeholder="Paste your hex secret here..."
+                value={tempSecret}
+                onChange={(e) => setTempSecret(e.target.value)}
+              />
+              <button 
+                onClick={handleConfirmSecret}
+                className="w-full bg-primary hover:bg-primary/90 text-white font-bold py-4 rounded-xl shadow-lg transition-all"
+              >
+                Authorize & Generate Proof
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Background Decor */}
       <div className="glow-bg top-0 left-1/4 w-[500px] h-[500px]" />
       <div className="glow-bg bottom-0 right-1/4 w-[400px] h-[400px]" style={{ animationDelay: '-4s' }} />
@@ -460,7 +551,7 @@ function App() {
                         onChange={(e) => setExtractedData({...extractedData, dob: e.target.value})}
                       />
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-2 col-span-1 md:col-span-2">
                       <label className="text-xs font-bold uppercase tracking-widest text-foreground/40 ml-1">Country of Residence</label>
                       <input 
                         className="w-full bg-white/5 border border-white/10 rounded-xl p-4 focus:ring-2 focus:ring-primary/20 outline-none text-white transition-all hover:bg-white/10"
@@ -468,21 +559,13 @@ function App() {
                         onChange={(e) => setExtractedData({...extractedData, country: e.target.value})}
                       />
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest text-foreground/40 ml-1">ID Number</label>
-                      <input 
-                        className="w-full bg-white/5 border border-white/10 rounded-xl p-4 focus:ring-2 focus:ring-primary/20 outline-none text-white transition-all hover:bg-white/10"
-                        value={extractedData.idNumber}
-                        onChange={(e) => setExtractedData({...extractedData, idNumber: e.target.value})}
-                      />
-                    </div>
                   </div>
 
                   <button 
-                    onClick={calculateHash}
+                    onClick={preparePII}
                     className="w-full bg-primary hover:bg-primary/90 text-white font-bold p-5 rounded-xl shadow-lg shadow-primary/20 transition-all flex items-center justify-center gap-2"
                   >
-                    Generate Commitment <ChevronRight className="w-5 h-5" />
+                    Prepare Identity Package <ChevronRight className="w-5 h-5" />
                   </button>
                 </div>
               )}
@@ -507,6 +590,17 @@ function App() {
                     >
                         {hasCopied ? <Check className="w-5 h-5 text-green-500" /> : <Copy className="w-5 h-5" />}
                     </button>
+                  </div>
+
+                  <div className="w-full max-w-md space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest text-foreground/40 ml-1">Existing Contract Address (Optional)</label>
+                    <input 
+                      className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none text-white transition-all hover:bg-white/10 placeholder:text-foreground/20"
+                      placeholder="Paste deployed contract address (d72d...)"
+                      value={manualAddress}
+                      onChange={(e) => setManualAddress(e.target.value)}
+                    />
+                    <p className="text-[10px] text-foreground/40 ml-1">Leave empty to deploy a new contract automatically.</p>
                   </div>
 
                   <button 

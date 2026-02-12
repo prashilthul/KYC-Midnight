@@ -1,130 +1,87 @@
 import path from 'path';
 import * as fs from 'fs';
-import * as readline from 'readline/promises';
-import { currentDir, UndeployedConfig } from './config.js';
-import { createLogger } from './logger.js';
+import * as api from './api.js';
+import { localConfig, UndeployedConfig } from './config.js';
+import { buildWalletFromHexSeed, displayWalletBalances } from './wallet-utils.js';
+import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
+import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
+import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
+import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
+import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
-let logger: Awaited<ReturnType<typeof createLogger>>;
+import { KYCCircuits } from './common-types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const zkConfigPath = path.resolve(__dirname, '../../contract/dist/managed/kyc');
 
 async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  🌙 Midnight KYC Deployment Configuration');
+  console.log('  🌙 Midnight KYC Functional Deployment');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
   try {
-    const logDir = path.resolve(
-      currentDir,
-      '..',
-      'logs',
-      'deploy',
-      `${new Date().toISOString().replace(/:/g, '-')}.log`
-    );
-
-    logger = await createLogger(logDir);
-
-    console.log('📋 This script creates deployment configuration.\n');
-    console.log('⚠️  For full deployment with wallet integration:');
-    console.log('   1. Reference the Midnight starter repository');
-    console.log('   2. Or use the frontend Lace wallet connection\n');
-
-    const walletChoice = await rl.question(
-      'Enter wallet seed for reference (y/n, default: n): '
-    );
-
-    let walletSeed: string;
-
-    if (walletChoice.toLowerCase().startsWith('y')) {
-      walletSeed = await rl.question(
-        'Enter your 64-character hex seed: '
-      );
-
-      if (walletSeed.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(walletSeed)) {
-        throw new Error('Seed must be exactly 64 hexadecimal characters.');
-      }
-    } else {
-      walletSeed =
-        '0000000000000000000000000000000000000000000000000000000000000001';
-      console.log('\nUsing genesis seed for local network reference.\n');
-    }
-
-    rl.close();
-
     const config = new UndeployedConfig();
-
-    // Generate a sample KYC commitment
-    console.log('🔐 Generating sample commitment...');
+    setNetworkId('undeployed');
     
-    const kycSecret = new Uint8Array(32);
-    const nodeCrypto = await import('crypto');
-    nodeCrypto.randomFillSync(kycSecret);
+    // 1. Wallet Setup (Genesis seed for local network)
+    const walletSeed = '0000000000000000000000000000000000000000000000000000000000000001';
+    console.log('📦 Initializing genesis wallet...');
+    const walletCtx = await buildWalletFromHexSeed(config, walletSeed);
     
-    const hashBuffer = await crypto.subtle.digest('SHA-256', kycSecret);
-    const commitment = Array.from(new Uint8Array(hashBuffer))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
+    console.log('🔄 Syncing wallet...');
+    await displayWalletBalances(walletCtx.wallet);
 
-    const deploymentInfo = {
-      status: 'CONFIGURATION_READY',
-      network: 'local',
-      walletSeedReference: walletSeed.substring(0, 8) + '...' + walletSeed.substring(56),
-      sampleCommitment: commitment,
-      deployedAt: new Date().toISOString(),
-      config: {
-        indexerUrl: config.indexerUrl,
-        indexerWebsocketUrl: config.indexerWebsocketUrl,
-        midnightNodeUrl: config.midnightNodeUrl,
-        proofServerUrl: config.proofServerUrl,
-      },
-      instructions: [
-        'This is a configuration template.',
-        'For actual deployment:',
-        '  Option 1: Use the frontend with Lace Wallet',
-        '  Option 2: Implement full wallet SDK following Midnight starter pattern',
-        '  Option 3: Reference: https://docs.midnight.network/getting-started/deploy-mn-app',
-      ],
+    // 2. Configure Providers
+    console.log('⚙️  Configuring providers...');
+    const zkConfigProvider = new NodeZkConfigProvider<KYCCircuits>(zkConfigPath);
+    const walletAndMidnightProvider = await api.createWalletAndMidnightProvider(walletCtx);
+    
+    const providers: api.KYCProviders = {
+      privateStateProvider: levelPrivateStateProvider({
+        privateStateStoreName: 'kyc-cli-deployment-state',
+        walletProvider: walletAndMidnightProvider,
+      }),
+      publicDataProvider: indexerPublicDataProvider(config.indexerUrl, config.indexerWebsocketUrl),
+      zkConfigProvider,
+      proofProvider: httpClientProofProvider(config.proofServerUrl, zkConfigProvider),
+      walletProvider: walletAndMidnightProvider,
+      midnightProvider: walletAndMidnightProvider,
     };
 
-    const deploymentPath = path.resolve(
-      currentDir,
-      '..',
-      'deployment-config.json'
-    );
-
-    fs.writeFileSync(
-      deploymentPath,
-      JSON.stringify(deploymentInfo, null, 2)
-    );
+    // 3. Deployment
+    console.log('🚀 Deploying KYC contract...');
+    
+    const kycContract = await api.deploy(providers);
+    const contractAddress = kycContract.deployTxData.public.contractAddress;
 
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  ✅ CONFIGURATION CREATED');
+    console.log('  ✅ DEPLOYMENT SUCCESSFUL');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-    console.log(`� Configuration saved at: ${deploymentPath}`);
-    console.log(`� Sample Commitment: ${commitment.substring(0, 16)}...`);
-    console.log('\n� Next Steps:');
-    console.log('   1. Ensure Docker containers are running (docker-compose up -d)');
-    console.log('   2. Build the contract (cd contract && npm run build)');
-    console.log('   3. Deploy via frontend with Lace Wallet connection');
-    console.log('   4. OR implement full wallet SDK (see Midnight starter repo)\n');
+    console.log(`📍 Contract Address: ${contractAddress}`);
+    console.log(`📜 Transaction ID:  ${kycContract.deployTxData.public.txId}`);
+    console.log('\n👉 ACTION REQUIRED:');
+    console.log(`   Update frontend/.env.local with:`);
+    console.log(`   VITE_CONTRACT_ADDRESS=${contractAddress}\n`);
 
-    logger.info(deploymentInfo, 'Deployment configuration created');
+    // 4. Save deployment info for reference
+    const deploymentPath = path.resolve(__dirname, '..', 'deployment-info.json');
+    fs.writeFileSync(deploymentPath, JSON.stringify({
+      contractAddress,
+      network: 'undeployed',
+      deployedAt: new Date().toISOString(),
+      txId: kycContract.deployTxData.public.txId
+    }, null, 2));
 
+    await walletCtx.wallet.stop();
     process.exit(0);
 
   } catch (error: any) {
-    rl.close();
-
-    console.error('\n❌ CONFIGURATION FAILED\n');
+    console.error('\n❌ DEPLOYMENT FAILED\n');
     console.error('Error:', error.message);
-
-    if (logger && error.stack) {
-      logger.error({ error: error.stack }, 'Configuration failed');
-    }
-
+    console.error(error.stack);
     process.exit(1);
   }
 }

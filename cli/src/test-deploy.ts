@@ -1,56 +1,25 @@
-import { createWalletAndMidnightProvider, deploy, register, WalletContext } from './api.js';
-import { generateRandomSeed, HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
-import { WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
-import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
-import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
-import { createKeystore, InMemoryTransactionHistoryStorage, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
-import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
-import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
-import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { createWalletAndMidnightProvider, deploy, register, type WalletContext } from './api.js';
+import { initWalletWithSeed, initGenesisSender } from './wallet-utils.js';
+import { generateRandomSeed } from '@midnight-ntwrk/wallet-sdk-hd';
 import path from 'path';
-import { persistentHash } from '@midnight-ntwrk/compact-runtime';
 import { logger } from './api.js';
+import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
+import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
+import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
+import { type KYCCircuits, type KYCProviders } from './common-types.js';
 
 async function testDeploy() {
   try {
     logger.info('=== STARTING DEPLOYMENT TEST ===');
     
     // Generate test wallet
-    const seed = generateRandomSeed();
-    const hdWallet = new HDWallet(seed);
+    const crypto = await import('crypto');
+    const seed = crypto.randomBytes(32);
     
-    const unshieldedKeystore = createKeystore(
-      hdWallet.derive(Roles.UnshieldedSigningKey),
-      new InMemoryTransactionHistoryStorage()
-    );
-    
-    const shieldedSecretKeys = {
-      coinSecretKey: hdWallet.derive(Roles.CoinKey),
-      encryptionSecretKey: hdWallet.derive(Roles.EncryptionKey)
-    };
-    
-    const dustSecretKey = hdWallet.derive(Roles.FeeKey);
-    
-    // Create wallet facade
-    const config = {
-      indexerUri: 'http://localhost:8080/query',
-      indexerWsUri: 'ws://localhost:8080/query',
-      substrateNodeUri: 'ws://localhost:9944',
-      proverServerUri: 'http://localhost:8081',
-    };
-    
-    const wallet = new WalletFacade(
-      new UnshieldedWallet(unshieldedKeystore, config.substrateNodeUri),
-      new ShieldedWallet(
-        shieldedSecretKeys.coinSecretKey,
-        shieldedSecretKeys.encryptionSecretKey,
-        config.indexerUri,
-        config.indexerWsUri,
-        config.substrateNodeUri
-      ),
-      new DustWallet(dustSecretKey, config.substrateNodeUri)
-    );
+    logger.info('Initializing wallet with random seed...');
+    const walletBundle = await initWalletWithSeed(seed);
+    const { wallet, shieldedSecretKeys, dustSecretKey, unshieldedKeystore } = walletBundle;
     
     const ctx: WalletContext = {
       wallet,
@@ -59,70 +28,84 @@ async function testDeploy() {
       unshieldedKeystore
     };
     
-    logger.info('Wallet created, syncing...');
-    await wallet.start();
+    logger.info('Wallet created and synced!');
+
+    // Use genesis for actual deployment power
+    logger.warn('NOTE: We need funds to deploy. Switching to GENESIS wallet for this test.');
+    const genesisBundle = await initGenesisSender();
     
-    // Wait for sync with timeout
-    const syncTimeout = 30000; // 30 second timeout
-    const startTime = Date.now();
-    
-    await new Promise((resolve, reject) => {
-      const sub = wallet.state().subscribe((state) => {
-        if (state.isSynced) {
-          logger.info('Wallet synced!');
-          sub.unsubscribe();
-          resolve(undefined);
-        } else if (Date.now() - startTime > syncTimeout) {
-          sub.unsubscribe();
-          reject(new Error('Wallet sync timeout'));
-        }
-      });
-    });
-    
+    // Create context for Genesis User
+    const genesisCtx: WalletContext = {
+        wallet: genesisBundle.wallet,
+        shieldedSecretKeys: genesisBundle.shieldedSecretKeys,
+        dustSecretKey: genesisBundle.dustSecretKey,
+        unshieldedKeystore: genesisBundle.unshieldedKeystore
+    };
+
     // Create providers
-    const zkConfigPath = path.resolve(__dirname, '../../contract/src/managed/kyc');
-    const walletAndMidnightProvider = await createWalletAndMidnightProvider(ctx);
+    const config = {
+      indexerUri: 'http://localhost:8088/api/v3/graphql',
+      indexerWsUri: 'ws://localhost:8088/api/v3/graphql/ws',
+      proverServerUri: 'http://localhost:6300',
+    };
     
-    const providers = {
+    // ESM compatible __dirname
+    const { fileURLToPath } = await import('url');
+    const { dirname, resolve } = await import('path');
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+
+    const zkConfigPath = resolve(__dirname, '../../contract/dist/managed/kyc');
+    const walletAndMidnightProvider = await createWalletAndMidnightProvider(genesisCtx);
+    
+    const zkConfigProvider = new NodeZkConfigProvider<KYCCircuits>(zkConfigPath);
+    const providers: KYCProviders = {
       privateStateProvider: levelPrivateStateProvider({
-        privateStateStoreName: 'kyc-test-state',
+        privateStateStoreName: 'kyc-test-deploy-state', // Unique DB
         walletProvider: walletAndMidnightProvider
       }),
       publicDataProvider: indexerPublicDataProvider(config.indexerUri, config.indexerWsUri),
-      zkConfigProvider: new NodeZkConfigProvider(zkConfigPath),
-      proofProvider: httpClientProofProvider(config.proverServerUri, new NodeZkConfigProvider(zkConfigPath)),
+      zkConfigProvider,
+      proofProvider: httpClientProofProvider(config.proverServerUri, zkConfigProvider),
       walletProvider: walletAndMidnightProvider,
       midnightProvider: walletAndMidnightProvider
     };
     
-    logger.info('Providers configured, deploying contract...');
+    logger.info('Providers configured. Deploying contract...');
     
     // Generate test commitment
-    const testSecret = new TextEncoder().encode('test-secret-12345678901234567890');
-    const commitment = new Uint8Array(persistentHash(testSecret));
+    const testSecret = new TextEncoder().encode('test-secret-cli-deploy');
+    // WORKAROUND: persistentHash requires runtime type, bypassing for connectivity test
+    // const commitment = new Uint8Array(persistentHash(testSecret));
+    const dummyPII = {
+      fullName: 'Test User',
+      birthYear: 1990,
+      country: 'india',
+      secret: '00'.repeat(32)
+    };
     
-    logger.info('Test commitment:', Buffer.from(commitment).toString('hex'));
+    // Fix logger signature: (obj, msg) or (msg)
+    logger.info({ pii: dummyPII }, 'Test PII generated');
     
     // Deploy contract
-    const kycContract = await deploy(providers, { kycSecret: testSecret });
+    const kycContract = await deploy(providers);
     
     logger.info('✅ Contract deployed successfully!');
-    logger.info('Contract address:', kycContract.deployTxData.public.contractAddress);
-    
-    // Call register circuit
-    const walletAddressBytes = new Uint8Array(32); // Mock wallet address
-    const registerResult = await register(kycContract, commitment, walletAddressBytes);
-    
-    logger.info('✅ Register circuit executed successfully!');
-    logger.info('TX Hash:', registerResult.txHash);
+    logger.info(`Contract address: ${kycContract.deployTxData.public.contractAddress}`);
+
+    // Initial Registration
+    logger.info('Initializing state with register()...');
+    const dummyWalletAddr = new Uint8Array(32);
+    await register(kycContract, dummyPII, dummyWalletAddr);
+    logger.info('✅ Register called successfully!');
     
     logger.info('=== TEST COMPLETED SUCCESSFULLY ===');
     process.exit(0);
     
   } catch (error: any) {
-    logger.error('❌ TEST FAILED:', error);
-    logger.error('Error message:', error.message);
-    logger.error('Error stack:', error.stack);
+    console.error('❌ TEST FAILED FULL ERROR:', error);
+    if (error.cause) console.error('Cause:', error.cause);
+    if (error.stack) console.error('Stack:', error.stack);
     process.exit(1);
   }
 }

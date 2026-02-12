@@ -3,43 +3,51 @@ pragma language_version >= 0.20;
 import CompactStandardLibrary;
 
 /**
+ * PII Data Struct - This is what the user "commits" to.
+ */
+struct Identity {
+    birth_year: Uint<32>;
+    country_hash: Bytes<32>;
+    secret: Bytes<32>;
+}
+
+/**
  * The on-chain fingerprint of the identity.
+ * commitment = persistentHash(Identity)
  */
 export ledger kyc_commitment: Bytes<32>;
 
 /**
  * Step 1: Registration
- * Links PII commitment to a specific wallet address on-chain.
+ * Links PII commitment to the blockchain.
  */
-export circuit register(commitment: Bytes<32>, wallet_address: Bytes<32>): [] {
-    kyc_commitment = disclose(commitment);
+export circuit register(id: Identity, wallet_address: Bytes<32>): [] {
+    kyc_commitment = disclose(persistentHash<Identity>(id));
 }
 
 /**
  * Step 2: Full Identity Ownership Proof
  */
-export circuit prove_identity(secret: Bytes<32>, wallet_address: Bytes<32>): [] {
-    assert(kyc_commitment == persistentHash<Bytes<32>>(secret), "Identity verification failed: Secret does not match commitment");
-    // In a production environment, we would also verify that the transaction 
-    // is signed by the matching wallet_address.
+export circuit prove_identity(id: Identity, wallet_address: Bytes<32>): [] {
+    assert(kyc_commitment == persistentHash<Identity>(id), "Identity verification failed: Proof does not match commitment");
 }
 
 /**
  * Step 3: Dynamic Age Eligibility Proof
  */
-export circuit prove_age_eligible(current_year: Uint<16>, birth_year: Uint<32>, min_age: Uint<16>, secret: Bytes<32>, wallet_address: Bytes<32>): [] {
-    assert(kyc_commitment == persistentHash<Bytes<32>>(secret), "Identity mismatch");
+export circuit prove_age_eligible(current_year: Uint<16>, min_age: Uint<16>, id: Identity, wallet_address: Bytes<32>): [] {
+    assert(kyc_commitment == persistentHash<Identity>(id), "Identity mismatch");
     const cy32 = current_year as Uint<32>;
     const min32 = min_age as Uint<32>;
-    assert(cy32 - birth_year >= min32, "Age Requirement Not Met: Access Denied");
+    assert(cy32 - id.birth_year >= min32, "Age Requirement Not Met: Access Denied");
 }
 
 /**
- * Step 4: Residency Verification (Ignored for now)
+ * Step 4: Residency Verification
  */
-export circuit prove_residency(required_country: Uint<16>, user_country: Uint<16>, secret: Bytes<32>, wallet_address: Bytes<32>): [] {
-    assert(kyc_commitment == persistentHash<Bytes<32>>(secret), "Identity mismatch");
-    assert(user_country == required_country, "Residency Blocked: Country does not match requirements");
+export circuit prove_residency(required_country_hash: Bytes<32>, id: Identity, wallet_address: Bytes<32>): [] {
+    assert(kyc_commitment == persistentHash<Identity>(id), "Identity mismatch");
+    assert(id.country_hash == required_country_hash, "Residency Blocked: Country does not match requirements");
 }
 
 /**

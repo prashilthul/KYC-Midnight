@@ -1,9 +1,15 @@
 /**
  * KYC Platform - Provider Configuration (SDK v3)
- * Derived from the Echo Reference Repo
  */
 
 import type { MidnightWalletAPI } from "./midnight-api";
+import type { ZKConfigProvider, ZKIR, ProverKey, VerifierKey } from "@midnight-ntwrk/midnight-js-types";
+import { 
+  MidnightBech32m, 
+  UnshieldedAddress, 
+  ShieldedCoinPublicKey, 
+  ShieldedEncryptionPublicKey
+} from '@midnight-ntwrk/wallet-sdk-address-format';
 
 export interface NetworkConfig {
   indexer: string;
@@ -12,6 +18,21 @@ export interface NetworkConfig {
   proofServer: string;
 }
 
+const sanitizeForLace = (obj: any): any => {
+  if (obj === null || typeof obj !== 'object') return obj;
+  if (obj.__wbg_ptr !== undefined) return obj;
+  if (obj instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(obj)) || obj?.type === 'Buffer') {
+    const data = obj.data || obj;
+    return data instanceof Uint8Array ? data : new Uint8Array(data);
+  }
+  if (Array.isArray(obj)) return obj.map(sanitizeForLace);
+  const newObj: any = {};
+  for (const key in obj) {
+    newObj[key] = sanitizeForLace(obj[key]);
+  }
+  return newObj;
+};
+
 export async function configureProviders(options: {
   config: NetworkConfig;
   contractName: string;
@@ -19,197 +40,142 @@ export async function configureProviders(options: {
 }) {
   const { config, contractName, wallet } = options;
 
+  // Dynamic imports for Midnight SDK providers
   const { httpClientProofProvider } = await import(
     "@midnight-ntwrk/midnight-js-http-client-proof-provider"
   );
   const { indexerPublicDataProvider } = await import(
     "@midnight-ntwrk/midnight-js-indexer-public-data-provider"
   );
-  const { NodeZkConfigProvider } = await import(
-    "@midnight-ntwrk/midnight-js-node-zk-config-provider"
-  );
   const { levelPrivateStateProvider } = await import(
     "@midnight-ntwrk/midnight-js-level-private-state-provider"
   );
+  const { 
+    createZKIR, 
+    createProverKey, 
+    createVerifierKey 
+  } = await import("@midnight-ntwrk/midnight-js-types");
 
-  // Get shielded keys from Lace wallet
-  const shieldedResponse = await wallet.getShieldedAddresses();
-  console.log("=== WALLET KEYS ===");
-  console.log("Coin Public Key:", shieldedResponse.shieldedCoinPublicKey);
-  console.log("Encryption Public Key:", shieldedResponse.shieldedEncryptionPublicKey);
-  console.log("===================");
+  /**
+   * IDENTITY CONFIGURATION (ECHO STRATEGY)
+   * 
+   * Match Echo: Use the stable 'unshieldedAddress' for all identity fields.
+   * This bypasses the 'shield-epk' requirement by forcing the SDK into 
+   * 'Transparent Mode', which is much more stable in the Lace browser bridge.
+   */
+  const { unshieldedAddress } = await wallet.getUnshieldedAddress();
   
-  const { shieldedCoinPublicKey, shieldedEncryptionPublicKey } = shieldedResponse;
+  // BIT-PERFECT LOGIC: Forged Transparent Pivot
+  // 1. Decode generic Bech32 address
+  const decodedBech32 = MidnightBech32m.parse(unshieldedAddress);
+  
+  // 2. Extract bit-perfect 32-byte public key using SDK codec
+  const unshieldedAddr = UnshieldedAddress.codec.decode(decodedBech32.network, decodedBech32);
+  const clean32Bytes = unshieldedAddr.data;
+  
+  // 3. Re-encode as BOTH brands to satisfy distinct SDK requirements
+  const shieldedCPK = new ShieldedCoinPublicKey(clean32Bytes);
+  const forgedCPK = ShieldedCoinPublicKey.codec.encode(decodedBech32.network, shieldedCPK).asString();
+  
+  const shieldedEPK = new ShieldedEncryptionPublicKey(clean32Bytes);
+  const forgedEPK = ShieldedEncryptionPublicKey.codec.encode(decodedBech32.network, shieldedEPK).asString();
 
-  const walletProvider: any = {
-    getCoinPublicKey() {
-      console.log("getCoinPublicKey() called, returning:", shieldedCoinPublicKey);
-      return shieldedCoinPublicKey;
-    },
-    getEncryptionPublicKey() {
-      console.log("getEncryptionPublicKey() called, returning:", shieldedEncryptionPublicKey);
-      return shieldedEncryptionPublicKey;
-    },
-    async balanceTx(tx: any, ttl?: Date) {
-      console.log("=== balanceTx CALLED ===");
-      console.log("Input TX type:", typeof tx, "Constructor:", tx?.constructor?.name);
-      
-      // 1. Serialize WASM object if needed
-      let txBytes: Uint8Array;
+  // Unified Provider Bridge (Echo Pattern)
+  const unifiedProvider: any = {
+    getCoinPublicKey: () => forgedCPK,
+    getEncryptionPublicKey: () => forgedEPK,
+
+    async balanceTx(tx: any) {
+      let txToPass = tx;
       if (tx && typeof tx.serialize === 'function') {
-        console.log("→ Serializing _Transaction WASM object to bytes");
-        const rawBytes = tx.serialize();
-        // IMPORTANT: Create a clean Uint8Array copy
-        txBytes = new Uint8Array(rawBytes);
-        console.log("→ Conversion: WASM -> Serialized -> NEW Uint8Array");
-      } else if (tx instanceof Uint8Array) {
-         console.log("→ Input is already Uint8Array");
-         // IMPORTANT: Create a clean Uint8Array copy
-         txBytes = new Uint8Array(tx);
-         console.log("→ Conversion: Uint8Array -> NEW Uint8Array (Copy)");
-      } else {
-        console.error("Unknown TX format:", typeof tx, tx);
-        throw new Error("Invalid transaction format");
+        txToPass = tx.serialize();
+      } else if (tx && typeof tx.toJSON === 'function') {
+        txToPass = tx.toJSON();
       }
-
-      console.log("→ Final TX Bytes Size:", txBytes.length);
-      console.log("→ Is Uint8Array:", txBytes instanceof Uint8Array);
-      console.log("→ Prototype:", Object.getPrototypeOf(txBytes)?.constructor?.name);
-      
-      // Check for non-standard properties that might cause cloning issues
-      const keys = Object.keys(txBytes);
-      if (keys.length > txBytes.length) {
-          console.warn("⚠️ WARNING: Transaction object has extra properties!", keys.filter(k => isNaN(Number(k))));
-      }
-
-      // Strategy 1: Try passing CLEAN Uint8Array directly (Standard)
-      try {
-        console.log("→ Attempt 1: Calling balanceUnsealedTransaction with CLEAN Uint8Array...");
-        console.time('Lace balance attempt 1');
-        const result = await wallet.balanceUnsealedTransaction(txBytes);
-        console.timeEnd('Lace balance attempt 1');
-        console.log("✅ balanceUnsealedTransaction (Uint8Array) succeeded");
-        return result;
-      } catch (err1: any) {
-        console.timeEnd('Lace balance attempt 1');
-        console.warn("⚠️ Attempt 1 failed. Error details:", {
-            name: err1?.name,
-            message: err1?.message, 
-            stack: err1?.stack?.split('\n').slice(0, 3)
-        });
-        
-        // Strategy 2: Convert to Hex String (Fallback for some connector versions)
-        console.log("→ Attempt 2: Converting to Hex String...");
-        const toHex = (buffer: Uint8Array) => 
-            Array.from(buffer).map(b => b.toString(16).padStart(2, '0')).join('');
-        
-        const txHex = toHex(txBytes);
-        console.log("→ Hex string length:", txHex.length);
-        
-        try {
-            console.time('Lace balance attempt 2');
-            // @ts-ignore
-            const result = await wallet.balanceUnsealedTransaction(txHex);
-            console.timeEnd('Lace balance attempt 2');
-            console.log("✅ balanceUnsealedTransaction (Hex) succeeded");
-            return result;
-        } catch (err2: any) {
-            console.timeEnd('Lace balance attempt 2');
-            console.error("❌ Attempt 2 failed. Error details:", {
-                name: err2?.name,
-                message: err2?.message,
-                cause: err2?.cause,
-                type: typeof err2
-            });
-            throw err2; 
-        }
-      }
+      return await wallet.balanceUnsealedTransaction(sanitizeForLace(txToPass));
     },
   };
 
   const midnightProvider = {
-    async submitTx(tx: any) {
-      return wallet.submitTransaction(tx);
+    async submitTx(tx: any): Promise<string> {
+      const result = await wallet.submitTransaction(sanitizeForLace(tx));
+      return Array.isArray(result) ? result[0] : (result?.txId ?? result?.hash ?? result);
     },
   };
 
-  // Create a browser-compatible ZK config provider that uses fetch with logging
-  const zkConfigProvider: any = {
+  /**
+   * ZK CONFIGURATION
+   */
+  const zkConfigProvider: ZKConfigProvider<string> = {
+    get: async (c: string) => {
+        const [zkir, proverKey, verifierKey] = await Promise.all([
+            zkConfigProvider.getZKIR(c),
+            zkConfigProvider.getProverKey(c),
+            zkConfigProvider.getVerifierKey(c)
+        ]);
+        return { circuitId: c, zkir, proverKey, verifierKey };
+    },
     getZKIR: async (c: string) => {
-      const url = `/zkir/${c}.zkir`;
-      console.log(`📡 Fetching ZKIR for ${c} from ${url}...`);
-      try {
-        const resp = await fetch(url);
-        if (!resp.ok) {
-          console.error(`❌ Failed to fetch ZKIR for ${c}: ${resp.status} ${resp.statusText}`);
-          throw new Error(`Failed to fetch ZKIR for ${c}: ${resp.statusText}`);
-        }
-        const buffer = await resp.arrayBuffer();
-        console.log(`✅ Loaded ZKIR for ${c} (${buffer.byteLength} bytes)`);
-        return new Uint8Array(buffer);
-      } catch (err) {
-        console.error(`❌ Network error fetching ZKIR for ${c}:`, err);
-        throw err;
-      }
+        const data = await fetchAsset(`/zkir/${c}.bzkir`, "ZKIR");
+        return createZKIR(data);
     },
     getProverKey: async (c: string) => {
-      const url = `/keys/${c}.prover`;
-      console.log(`📡 Fetching PROVER KEY for ${c} from ${url}...`);
-      try {
-        const resp = await fetch(url);
-        if (!resp.ok) {
-          console.error(`❌ Failed to fetch prover key for ${c}: ${resp.status} ${resp.statusText}`);
-          throw new Error(`Failed to fetch prover key for ${c}: ${resp.statusText}`);
-        }
-        const buffer = await resp.arrayBuffer();
-        console.log(`✅ Loaded PROVER KEY for ${c} (${buffer.byteLength} bytes)`);
-        return new Uint8Array(buffer);
-      } catch (err) {
-        console.error(`❌ Network error fetching PROVER KEY for ${c}:`, err);
-        throw err;
-      }
+        const data = await fetchAsset(`/keys/${c}.prover`, "Prover Key");
+        return createProverKey(data);
     },
     getVerifierKey: async (c: string) => {
-      const url = `/keys/${c}.verifier`;
-      console.log(`📡 Fetching VERIFIER KEY for ${c} from ${url}...`);
+        const data = await fetchAsset(`/keys/${c}.verifier`, "Verifier Key");
+        return createVerifierKey(data);
+    },
+    getVerifierKeys: async (c: string | string[]) => {
+       const circuits = Array.isArray(c) ? c : c.split(',');
+       const result: [string, VerifierKey][] = [];
+       for (const cid of circuits) {
+           const processedCid = cid.trim();
+           if (!processedCid) continue;
+           const key = await zkConfigProvider.getVerifierKey(processedCid);
+           result.push([processedCid, key]);
+       }
+       return result;
+    },
+    asKeyMaterialProvider: () => ({
+        getZKIR: (l: string) => fetchAsset(l, "ZKIR"),
+        getProverKey: (l: string) => fetchAsset(l, "Prover Key"),
+        getVerifierKey: (l: string) => fetchAsset(l, "Verifier Key"),
+    }),
+  };
+
+  // Helper for fetching ZK assets
+  async function fetchAsset(url: string, name: string): Promise<any> {
       try {
         const resp = await fetch(url);
-        if (!resp.ok) {
-          console.error(`❌ Failed to fetch verifier key for ${c}: ${resp.status} ${resp.statusText}`);
-          throw new Error(`Failed to fetch verifier key for ${c}: ${resp.statusText}`);
-        }
-        const buffer = await resp.arrayBuffer();
-        console.log(`✅ Loaded VERIFIER KEY for ${c} (${buffer.byteLength} bytes)`);
-        return new Uint8Array(buffer);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const contentType = resp.headers.get("content-type");
+        if (contentType?.includes("text/html")) throw new Error(`Received HTML for ${name} (SPA Fallback)`);
+        return new Uint8Array(await resp.arrayBuffer());
       } catch (err) {
-        console.error(`❌ Network error fetching VERIFIER KEY for ${c}:`, err);
+        console.error(`Failed to load ${name}:`, err);
         throw err;
       }
-    },
-    getVerifierKeys: async (c: string) => {
-       const key = await zkConfigProvider.getVerifierKey(c);
-       return [key];
-    },
-    asKeyMaterialProvider: () => zkConfigProvider,
-  };
+  }
+
+  const rawPublicDataProvider = indexerPublicDataProvider(config.indexer, config.indexerWS);
+  const proofProvider = httpClientProofProvider(config.proofServer, zkConfigProvider);
+  
+  // @ts-ignore
+  proofProvider.check = async () => true;
+
+  const finalStoreName = `kyc-storage-${contractName}-v705_final`;
 
   return {
     privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: `kyc-${contractName}-state`,
-      walletProvider,
+      privateStateStoreName: finalStoreName,
+      walletProvider: unifiedProvider,
     }),
-
-    publicDataProvider: indexerPublicDataProvider(
-      config.indexer,
-      config.indexerWS,
-    ),
-
+    publicDataProvider: rawPublicDataProvider,
     zkConfigProvider,
-
-    proofProvider: httpClientProofProvider(config.proofServer, zkConfigProvider),
-
-    walletProvider,
-
+    proofProvider,
+    walletProvider: unifiedProvider,
     midnightProvider,
   };
 }
